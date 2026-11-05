@@ -1,0 +1,7 @@
+# Audit output can contain real tenant data: never commit it.
+audit/
+*.json
+!powershell/**/*.json
+__pycache__/
+*.pyc
+.DS_Store
