@@ -1,53 +1,58 @@
-# M365 → Google Workspace migration toolkit
+# m365-workspace-migration-toolkit
 
-Tools I use to plan, check and finish small-business mail migrations from Microsoft 365 to Google Workspace:
+Scripts for moving a small organization from Microsoft 365 to Google Workspace.
 
-| Part | What it does |
-|---|---|
-| [`ExoTenantAudit`](powershell/ExoTenantAudit) (PowerShell) | Read-only inventory of an Exchange Online tenant: domains, mailboxes with sizes and item counts, aliases, delegation and group membership. Writes one CSV per area plus `summary.json`. |
-| [`migration_check.py`](python/migration_check.py) (Python) | Compares source and target item counts per account and workload, reports the success rate, and exits non-zero when anything needs review, so it can gate a cutover. |
-| [Cutover runbook](docs/cutover-runbook-template.md) | The checklist for the final delta sync, DNS changes (MX, SPF, DKIM, DMARC), handover and cleanup. |
+- `ExoTenantAudit` is a PowerShell module that inventories an Exchange Online tenant before a migration. It is read-only.
+- `migration_check.py` compares item counts between source and target and lists anything that didn't make it across.
+- `docs/cutover-runbook-template.md` is the checklist I follow for the final sync and DNS change.
 
-All three came out of a real migration: 33 mailboxes, about 250 GB and 470K items moved with a 99.1% first-pass success rate. No client data is in this repository; the examples use `contoso.com`.
+## Background
 
-## Tenant audit
+Google's Data Import service moves the data, but it doesn't plan the migration for you. Before starting I need a list of mailboxes, shared mailboxes, aliases, delegates and groups so they can be rebuilt on the Google side. After each sync I want one view of which accounts are short, across every workload, instead of reading each report separately.
 
-Needs PowerShell 7 and the [ExchangeOnlineManagement](https://www.powershellgallery.com/packages/ExchangeOnlineManagement) module (v3). It only reads; it never changes the tenant.
+These came out of a 33-mailbox migration (about 250 GB and 470,000 items). No client data is included; examples use `contoso.com`.
+
+## Install
+
+Requirements:
+
+- PowerShell 7 and [ExchangeOnlineManagement](https://www.powershellgallery.com/packages/ExchangeOnlineManagement) 3.x for the audit
+- Python 3.9 or later for the count check (standard library only)
 
 ```powershell
+git clone https://github.com/Noire1812/m365-workspace-migration-toolkit.git
+cd m365-workspace-migration-toolkit
 Install-Module ExchangeOnlineManagement -Scope CurrentUser
+```
+
+## Usage
+
+### Tenant audit
+
+```powershell
 Connect-ExchangeOnline -UserPrincipalName admin@contoso.com
 Import-Module ./powershell/ExoTenantAudit
-Invoke-ExoTenantAudit -OutputPath ./audit -Verbose
+Invoke-ExoTenantAudit -OutputPath ./audit
 ```
 
-Output:
+This writes the following to `./audit`:
 
-| File | One row per |
-|---|---|
-| `domains.csv` | accepted domain |
-| `mailboxes.csv` | mailbox: type, item count, size in bytes, litigation hold, deleted-item retention |
-| `aliases.csv` | secondary SMTP address, to recreate on the target |
-| `delegation.csv` | Full Access or Send As grant (inherited and `SELF` entries skipped) |
-| `groups.csv` | group member or owner, with whether the group accepts outside senders |
-| `summary.json` | totals for the whole tenant |
-
-Design notes:
-
-- **Exact sizes.** The REST-based v3 cmdlets return sizes as text such as `1.234 GB (1,325,000,000 bytes)`. `ConvertTo-ByteCount` reads the byte figure in brackets instead of converting units, so totals don't drift.
-- **Aliases.** In `EmailAddresses`, `SMTP:` (uppercase) is the primary address and `smtp:` (lowercase) a secondary one, so that comparison is case-sensitive on purpose.
-- **Empty groups stay visible.** They're listed as `(empty group)` so they can be reviewed for cleanup rather than silently dropped.
-
-Tests use [Pester 5](https://pester.dev) and mock every Exchange cmdlet, so they run without a tenant:
-
-```powershell
-Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser
-Invoke-Pester ./powershell/ExoTenantAudit/Tests
+```
+domains.csv       accepted domains
+mailboxes.csv     type, item count, size in bytes, litigation hold, deleted-item retention
+aliases.csv       secondary SMTP addresses
+delegation.csv    Full Access and Send As grants
+groups.csv        distribution and Microsoft 365 group members and owners
+summary.json      totals
 ```
 
-## Migration check
+The individual functions (`Get-ExoMailboxInventory`, `Get-ExoAliasInventory`, `Get-ExoMailboxDelegation`, `Get-ExoGroupInventory`, `Get-ExoDomainInventory`) can also be run on their own and piped wherever you need them.
 
-Standard library only (Python 3.9+). Each input is a CSV with the columns `account,workload,items`: one for the source counts (for example from `mailboxes.csv`), one for what arrived in the target (for example from the Google Workspace Data Import report).
+Audit output contains real tenant data. `audit/` is in `.gitignore`; keep it out of version control.
+
+### Count check
+
+Both files are CSVs with the columns `account,workload,items`. Build the source file from `mailboxes.csv` (or the Microsoft 365 admin reports) and the target file from the Data Import report.
 
 ```console
 $ python python/migration_check.py python/examples/source.csv python/examples/target.csv
@@ -64,15 +69,25 @@ Needs review:
   MISSING_IN_TARGET  email        frontdesk@contoso.com                0 of 7,310 (0.00%)
 ```
 
-- `--threshold` sets the minimum success rate per account and workload (default 99%).
-- `--json out.json` also writes the full result.
-- Exit status: `0` all clear, `1` something needs review, `2` bad input.
-- Extra items on the target (duplicates) don't raise the success rate above 100%.
+Options:
 
-```console
+```
+--threshold N   minimum success percentage per account and workload (default 99)
+--json PATH     also write the full result as JSON
+```
+
+The script exits 0 when everything meets the threshold, 1 when something needs review, and 2 on bad input, so it can be used as a check before cutover.
+
+## Tests
+
+```powershell
+Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser
+Invoke-Pester ./powershell/ExoTenantAudit/Tests
 python -m unittest discover python
 ```
 
+The Pester tests mock the Exchange Online cmdlets, so no tenant or connection is needed.
+
 ## License
 
-MIT
+[MIT](LICENSE) © Joseph Lyons
